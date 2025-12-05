@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+venv/
+Seedling_Imager/
+.DS_Store
+
