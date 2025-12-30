@@ -6,8 +6,8 @@ from gpiod.line import Direction, Value, Bias
 
 CHIP = "/dev/gpiochip0"
 EN_PIN = 21
-DIR_PIN = 20
-STEP_PIN = 16
+DIR_PIN = 16
+STEP_PIN = 20
 SWITCH_PIN = 26       # Hall effect sensor
 OPTICAL_PIN = 19      # Optical sensor (ITR20001)
 
