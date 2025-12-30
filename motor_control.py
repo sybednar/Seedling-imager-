@@ -1,27 +1,26 @@
-# motor_control.py with drift correction
 
+# motor_control.py (replace calibrate() with home())
 import time
 import gpiod
 from gpiod.line import Direction, Value, Bias
 
 CHIP = "/dev/gpiochip0"
 EN_PIN = 21
-DIR_PIN = 16
 STEP_PIN = 20
-SWITCH_PIN = 26       # Hall effect sensor
-OPTICAL_PIN = 19      # Optical sensor (ITR20001)
+DIR_PIN = 16
+SWITCH_PIN = 26  # Hall effect sensor
+OPTICAL_PIN = 19 # Optical sensor (ITR20001)
 
 steps_per_60_deg = 800
 calibration_offset_steps = 395
 current_plate = 0
 
-# Configure pins
 request = gpiod.request_lines(
     CHIP,
     consumer="seedling_imager",
     config={
         EN_PIN: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
-        DIR_PIN: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.ACTIVE),  # Clockwise
+        DIR_PIN: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.ACTIVE), # Clockwise
         STEP_PIN: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
         SWITCH_PIN: gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.PULL_UP),
         OPTICAL_PIN: gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.PULL_UP)
@@ -35,12 +34,16 @@ def step_motor(steps, delay=0.0025):
         request.set_value(STEP_PIN, Value.INACTIVE)
         time.sleep(delay)
 
-def calibrate(timeout=60, status_callback=None):
+def home(timeout=60, status_callback=None):
+    """
+    Homing routine: seek hall sensor, then align with optical sensor.
+    Returns current plate index (1) or None on failure.
+    """
     global current_plate
     start_time = time.time()
     if status_callback:
-        status_callback("Starting calibration... Fast rotation")
-    print("DEBUG: Calibration started", flush=True)
+        status_callback("Starting homing... Fast rotation")
+    print("DEBUG: Homing started", flush=True)
 
     # Rotate until hall sensor triggers
     while request.get_value(SWITCH_PIN) == Value.ACTIVE:
@@ -49,7 +52,7 @@ def calibrate(timeout=60, status_callback=None):
             status_callback("Searching for home...")
         if time.time() - start_time > timeout:
             if status_callback:
-                status_callback("Calibration timeout! Switch not detected.")
+                status_callback("Homing timeout! Switch not detected.")
             print("DEBUG: Timeout occurred", flush=True)
             return None
 
@@ -75,12 +78,11 @@ def calibrate(timeout=60, status_callback=None):
         if status_callback:
             status_callback(msg)
 
-    # Final message
     if status_callback:
-        status_callback("Calibration complete. Plate #1 aligned.")
-
+        status_callback("Homing complete. Plate #1 aligned.")
     current_plate = 1
     return current_plate
+
 
 def advance(status_callback=None):
     global current_plate
@@ -110,7 +112,13 @@ def advance(status_callback=None):
 
         # Reset plate count after correction
         current_plate = 1
-        msg = f"Drift correction applied with {extra_steps} extra steps. Plate reset to #1"
+
+        # Always report correction, even if 0 steps were needed
+        if extra_steps == 0 and request.get_value(OPTICAL_PIN) == Value.INACTIVE:
+            msg = "Drift correction: already aligned at Plate #1 (0 extra steps)"
+        else:
+            msg = f"Drift correction applied with {extra_steps} extra steps. Plate reset to #1"
+
         if status_callback:
             status_callback(msg)
         print(f"DEBUG: {msg}", flush=True)
@@ -118,4 +126,23 @@ def advance(status_callback=None):
     return current_plate
 
 
+def goto_plate(target_plate, status_callback=None):
+    """
+    Move to the specified target plate (1..6) using repeated advance().
+    """
+    global current_plate
+    target_plate = int(target_plate)
+    if target_plate < 1 or target_plate > 6:
+        if status_callback:
+            status_callback(f"goto_plate: invalid target {target_plate}")
+        return current_plate
+
+    if status_callback:
+        status_callback(f"Moving to Plate #{target_plate} from #{current_plate}")
+
+    max_steps = 6
+    while current_plate != target_plate and max_steps > 0:
+        advance(status_callback=status_callback)
+        max_steps -= 1
+    return current_plate
 
