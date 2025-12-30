@@ -26,8 +26,8 @@ The Seedling Imager is a Raspberry Pi-based imaging system designed to monitor A
 ## GPIO Pin Map
 | Function        | GPIO Pin |
 |-----------------|----------|
-| STEP           | 16       |
-| DIR            | 20       |
+| STEP           | 20       |
+| DIR            | 16       |
 | EN             | 21       |
 | Hall Sensor    | 26       |
 | Optical Sensor | 19       |
