@@ -1,6 +1,30 @@
 <
 # Changelog
 
+
+## v0.06 — 2026-01-08
+- **Camera & Imaging**
+  - Dual-stream Picamera2 config: full-res TIFF (4608×2592) + lores preview (640×360).
+  - Lossless TIFF saving via `tifffile` (zlib compression).
+  - AF helpers: Continuous AF in Live View; single AF trigger during settle.
+  - AE lock/unlock: AE enabled during settle; disabled before capture for consistency.
+- **Experiment Runner**
+  - Per-plate sequence: LED ON → AF → 10 s settle → capture → LED OFF → advance.
+  - Post-cycle wait after Plate 6, then start next cycle at Plate 1.
+  - **CSV metadata logging** (`metadata.csv`): timestamp, cycle, plate, illumination, path, dimensions, size, AE, exposure, gain, AWB.
+- **GUI**
+  - **Camera Config dialog** with persisted settings (`camera_settings.json`).
+  - **File Manager**: toolbar actions, thumbnails with robust TIFF fallback, per-plate filter, CSV tab & Open CSV.
+  - **Experiment Setup**: storage estimate + free-space warning.
+  - Live View stability and LED control restored; last-saved-image preview after capture.
+- **Autostart & Launcher**
+  - Systemd user service (`seedling-imager.service`) and desktop autostart entry.
+  - Desktop launcher icon (`Seedling-Imager.desktop`).
+
+---
+
+
+
 ## v0.05 — 2025-12-30
 - **New:** `experiment_runner.py` to schedule time-lapse imaging cycles.
   - Per-plate sequence: illumination ON → 10 s settle → capture (if selected) → illumination OFF → advance.
