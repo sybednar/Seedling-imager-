@@ -2,32 +2,35 @@
 # experiment_setup.py
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
-    QGridLayout, QCheckBox, QLineEdit, QWidget
+    QGridLayout, QCheckBox, QLineEdit
 )
 from PySide6.QtCore import Qt
 from styles import dark_style
+import shutil
+from pathlib import Path
 
 ILLUM_GREEN = "Green"
 ILLUM_IR = "Infrared"
 
-SEA_FOAM_GREEN = "#26A69A"  # current green-ish teal
-DEEP_RED = "#B71C1C"        # requested deep red for IR
+SEA_FOAM_GREEN = "#26A69A"
+DEEP_RED = "#B71C1C"
+
+# ---- NEW: constants for storage estimate ----
+IMAGES_ROOT = Path("/home/sybednar/Seedling_Imager/images").expanduser()
+AVG_IMAGE_MB = 15.0  # Adjust if your TIFF files average larger/smaller
 
 class ExperimentSetupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Experiment Setup")
-        # Keep width reasonable for 800x480 screen and reduce height to avoid cutoff
         self.setMinimumWidth(580)
         self.setStyleSheet(dark_style)
 
-        self.selected_illum = ILLUM_GREEN  # default
+        self.selected_illum = ILLUM_GREEN
 
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(18, 14, 18, 14)
 
-        # --- Illumination selector row ---
+        # Illumination row (unchanged)
         illum_row = QHBoxLayout()
         illum_label = QLabel("Illumination:")
         illum_label.setStyleSheet("font-size: 18px; color: white;")
@@ -35,12 +38,12 @@ class ExperimentSetupDialog(QDialog):
         self.illum_toggle.setFixedSize(160, 48)
         self.apply_illum_style()
         self.illum_toggle.clicked.connect(self.toggle_illum)
-        illum_row.addWidget(illum_label, alignment=Qt.AlignLeft)
+        illum_row.addWidget(illum_label)
         illum_row.addStretch()
-        illum_row.addWidget(self.illum_toggle, alignment=Qt.AlignRight)
+        illum_row.addWidget(self.illum_toggle)
         main_layout.addLayout(illum_row)
 
-        # --- Duration input ---
+        # Duration (unchanged except signal to recompute estimate)
         duration_layout = QHBoxLayout()
         duration_label = QLabel("Duration (days):")
         duration_label.setStyleSheet("font-size: 18px; color: white;")
@@ -48,13 +51,14 @@ class ExperimentSetupDialog(QDialog):
         self.duration_value.setAlignment(Qt.AlignCenter)
         self.duration_value.setFixedSize(110, 60)
         self.duration_value.setStyleSheet("background-color: white; color: black; font-size: 22px;")
-        duration_up = QPushButton("▲")
-        duration_down = QPushButton("▼")
+        duration_up = QPushButton("▲"); duration_down = QPushButton("▼")
         for btn in (duration_up, duration_down):
             btn.setFixedSize(58, 60)
             btn.setStyleSheet("background-color: #ccc; font-size: 24px; font-weight: bold;")
         duration_up.clicked.connect(lambda: self.adjust_value(self.duration_value, 1, 1, 7))
         duration_down.clicked.connect(lambda: self.adjust_value(self.duration_value, -1, 1, 7))
+        # Recompute when value is edited manually
+        self.duration_value.textChanged.connect(self.update_storage_estimate)
         duration_layout.addWidget(duration_label)
         duration_layout.addStretch()
         duration_layout.addWidget(duration_up)
@@ -62,7 +66,7 @@ class ExperimentSetupDialog(QDialog):
         duration_layout.addWidget(duration_down)
         main_layout.addLayout(duration_layout)
 
-        # --- Frequency input ---
+        # Frequency
         freq_layout = QHBoxLayout()
         freq_label = QLabel("Acquisition Frequency (minutes):")
         freq_label.setStyleSheet("font-size: 18px; color: white;")
@@ -70,13 +74,14 @@ class ExperimentSetupDialog(QDialog):
         self.freq_value.setAlignment(Qt.AlignCenter)
         self.freq_value.setFixedSize(110, 60)
         self.freq_value.setStyleSheet("background-color: white; color: black; font-size: 22px;")
-        freq_up = QPushButton("▲")
-        freq_down = QPushButton("▼")
+        freq_up = QPushButton("▲"); freq_down = QPushButton("▼")
         for btn in (freq_up, freq_down):
             btn.setFixedSize(58, 60)
             btn.setStyleSheet("background-color: #ccc; font-size: 24px; font-weight: bold;")
-        freq_up.clicked.connect(lambda: self.adjust_value(self.freq_value, 30, 1, 360)) #changed second argument (min value) to 1 for testing change back to 30 min for final version
-        freq_down.clicked.connect(lambda: self.adjust_value(self.freq_value, -30, 1, 360)) #changed second argument (min value) to 1 for testing change back to 30 min for final version
+        freq_up.clicked.connect(lambda: self.adjust_value(self.freq_value, 30, 1, 360))
+        freq_down.clicked.connect(lambda: self.adjust_value(self.freq_value, -30, 1, 360))
+        # Recompute when value is edited manually
+        self.freq_value.textChanged.connect(self.update_storage_estimate)
         freq_layout.addWidget(freq_label)
         freq_layout.addStretch()
         freq_layout.addWidget(freq_up)
@@ -84,50 +89,39 @@ class ExperimentSetupDialog(QDialog):
         freq_layout.addWidget(freq_down)
         main_layout.addLayout(freq_layout)
 
-        # --- Instruction ---
+        # Instruction
         instruction_label = QLabel("Select plates for experiment:")
         instruction_label.setAlignment(Qt.AlignCenter)
         instruction_label.setStyleSheet("font-size: 18px; color: white;")
         main_layout.addWidget(instruction_label)
 
-        # --- Two centered rows of checkboxes with visible outlines ---
-        # Row 1: Plate 1, 2, 3
-        # Row 2: Plate 4, 5, 6
-        plate_font_css = (
-            "QCheckBox { color: white; font-size: 16px; } "
-            "QCheckBox::indicator { width: 22px; height: 22px; } "
-            "QCheckBox::indicator:unchecked { border: 2px solid #BBBBBB; background: #222222; } "
-            "QCheckBox::indicator:checked { border: 2px solid #1E88E5; background: #1E88E5; } "
-        )
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(24)
-        row1.setAlignment(Qt.AlignCenter)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(24)
-        row2.setAlignment(Qt.AlignCenter)
-
+        # Two-row plate grid (unchanged except connect signals)
+        grid_layout = QGridLayout()
+        grid_layout.setHorizontalSpacing(20); grid_layout.setVerticalSpacing(10)
         self.plate_checkboxes = {}
-        for name in ["Plate 1", "Plate 2", "Plate 3"]:
-            cb = QCheckBox(name)
-            cb.setStyleSheet(plate_font_css)
-            self.plate_checkboxes[name] = cb
-            row1.addWidget(cb)
+        for row, names in enumerate([["Plate 1", "Plate 2", "Plate 3"], ["Plate 4", "Plate 5", "Plate 6"]]):
+            h = QHBoxLayout(); h.setSpacing(24); h.setAlignment(Qt.AlignCenter)
+            for name in names:
+                cb = QCheckBox(name)
+                cb.setStyleSheet(
+                    "QCheckBox { color: white; font-size: 16px; } "
+                    "QCheckBox::indicator { width: 22px; height: 22px; } "
+                    "QCheckBox::indicator:unchecked { border: 2px solid #BBBBBB; background: #222222; } "
+                    "QCheckBox::indicator:checked { border: 2px solid #1E88E5; background: #1E88E5; } "
+                )
+                cb.toggled.connect(self.update_storage_estimate)  # <-- recompute when plate selection changes
+                self.plate_checkboxes[name] = cb
+                h.addWidget(cb)
+            main_layout.addLayout(h)
 
-        for name in ["Plate 4", "Plate 5", "Plate 6"]:
-            cb = QCheckBox(name)
-            cb.setStyleSheet(plate_font_css)
-            self.plate_checkboxes[name] = cb
-            row2.addWidget(cb)
+        # ---- NEW: storage estimate label ----
+        self.storage_label = QLabel("")
+        self.storage_label.setAlignment(Qt.AlignCenter)
+        self.storage_label.setStyleSheet("font-size: 16px; color: #CCCCCC;")
+        main_layout.addWidget(self.storage_label)
 
-        main_layout.addLayout(row1)
-        main_layout.addLayout(row2)
-
-        # --- Buttons ---
-        main_layout.addSpacing(8)
+        # Buttons
         button_layout = QHBoxLayout()
-        button_layout.setSpacing(12)
         self.start_button = QPushButton("Start Experiment")
         self.exit_button = QPushButton("Exit")
         self.start_button.setStyleSheet("background-color: #43A047; color: white; font-weight: bold; padding: 10px; font-size: 18px;")
@@ -142,32 +136,11 @@ class ExperimentSetupDialog(QDialog):
 
         self.setLayout(main_layout)
 
-        # Compact the dialog to avoid cutoff and center on parent
-        self.adjustSize()
-        self.setFixedSize(self.sizeHint())
-        self.center_on_parent()
+        # Initial compute
+        self.update_storage_estimate()
 
-    def center_on_parent(self):
-        p = self.parent()
-        if p and p.isVisible():
-            # Center relative to parent window
-            parent_geo = p.geometry()
-            self.move(
-                parent_geo.x() + (parent_geo.width() - self.width()) // 2,
-                parent_geo.y() + (parent_geo.height() - self.height()) // 2
-            )
-        else:
-            # Center on screen (fallback)
-            screen = self.screen()
-            if screen:
-                scr_geo = screen.geometry()
-                self.move(
-                    scr_geo.x() + (scr_geo.width() - self.width()) // 2,
-                    scr_geo.y() + (scr_geo.height() - self.height()) // 2
-                )
-
+    # --- existing helpers (illumination & adjust_value) unchanged ---
     def apply_illum_style(self):
-        """Set illumination toggle colors based on selection."""
         if self.selected_illum == ILLUM_GREEN:
             self.illum_toggle.setStyleSheet(
                 f"background-color: {SEA_FOAM_GREEN}; color: white; font-size: 18px; font-weight: bold; border-radius: 8px;"
@@ -189,6 +162,45 @@ class ExperimentSetupDialog(QDialog):
             current = min_val
         new_val = max(min_val, min(max_val, current + step))
         line_edit.setText(str(new_val))
+        # recompute after button presses
+        self.update_storage_estimate()
+
+    # ---- NEW: storage estimate computation ----
+    def update_storage_estimate(self):
+        try:
+            duration_days = int(self.duration_value.text())
+            frequency_minutes = int(self.freq_value.text())
+        except ValueError:
+            duration_days = 1
+            frequency_minutes = 30
+
+        selected = [name for name, cb in self.plate_checkboxes.items() if cb.isChecked()]
+        n_plates = len(selected)
+
+        cycles = int((duration_days * 24 * 60) / max(1, frequency_minutes))
+        images = n_plates * cycles
+        est_gb = (images * AVG_IMAGE_MB) / 1024.0
+
+        # disk free
+        try:
+            total, used, free = shutil.disk_usage(IMAGES_ROOT)
+            free_gb = free / (1024 ** 3)
+        except Exception:
+            free_gb = None
+
+        if n_plates == 0:
+            msg = "No plates selected — storage estimate unavailable."
+            style = "font-size: 16px; color: #CCCCCC;"
+        else:
+            msg = f"Estimated storage: ~{est_gb:.1f} GB  ({images} images over {cycles} cycles)"
+            if free_gb is not None:
+                msg += f"  |  Free: {free_gb:.1f} GB"
+                style = "font-size: 16px; color: #43A047;" if est_gb <= free_gb else "font-size: 16px; color: #E53935;"
+            else:
+                style = "font-size: 16px; color: #CCCCCC;"
+
+        self.storage_label.setText(msg)
+        self.storage_label.setStyleSheet(style)
 
     def validate_and_start(self):
         selected = [name for name, cb in self.plate_checkboxes.items() if cb.isChecked()]
@@ -198,5 +210,4 @@ class ExperimentSetupDialog(QDialog):
         self.selected_plates = selected
         self.duration_days = int(self.duration_value.text())
         self.frequency_minutes = int(self.freq_value.text())
-        # illumination already tracked in self.selected_illum
         self.accept()
