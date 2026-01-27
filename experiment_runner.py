@@ -1,4 +1,3 @@
-
 # experiment_runner.py
 from PySide6.QtCore import QThread, Signal
 from datetime import datetime, timedelta
@@ -7,7 +6,6 @@ import time
 import json
 import csv
 import os
-
 import motor_control
 import camera
 from camera_config import load_settings
@@ -28,7 +26,6 @@ class ExperimentRunner(QThread):
         self.frequency_minutes = int(frequency_minutes)
         self.illumination_mode = illumination_mode
         self.led_control_fn = led_control_fn
-
         self._abort = False
         self.wait_seconds_for_camera = 10
         self.cycle_count = 0  # NEW: count cycles for CSV logging
@@ -114,6 +111,9 @@ class ExperimentRunner(QThread):
             self.finished_signal.emit()
             return
 
+        # Ensure driver is enabled prior to homing (GUI Stop may have left EN high)
+        motor_control.driver_enable()  # EN low = enabled                         # [1](https://uwprod-my.sharepoint.com/personal/sybednar_wisc_edu/Documents/Microsoft%20Copilot%20Chat%20Files/seedling%20imager_controller_v0.06.txt)
+
         plate = motor_control.home(status_callback=self.status_signal.emit)
         if plate is None:
             self._log("Homing failed; experiment aborted.")
@@ -130,14 +130,12 @@ class ExperimentRunner(QThread):
 
         # Open CSV once
         self._open_csv()
-
         self._log(
             f"Experiment started: {self.duration_days} day(s), "
             f"every {self.frequency_minutes} min. Illumination: {self.illumination_mode}"
         )
 
         end_time = datetime.now() + timedelta(days=self.duration_days)
-
         try:
             while datetime.now() < end_time and not self._abort:
                 self.cycle_count += 1
@@ -147,11 +145,9 @@ class ExperimentRunner(QThread):
                 for plate_idx in range(1, 7):
                     if self._abort:
                         break
-
                     # LED ON
                     if self.led_control_fn:
                         self.led_control_fn(True, self.illumination_mode)
-
                     # Settle: AE on + settle preview
                     camera.set_auto_exposure(True)
                     # (Optional AF trigger here if you've added it)
@@ -161,16 +157,13 @@ class ExperimentRunner(QThread):
                     self.settling_finished.emit(plate_idx)
                     if self._abort:
                         break
-
                     # Lock AE for consistent capture
                     camera.set_auto_exposure(False)
-
                     # Capture if plate selected
                     if plate_idx in self.selected_plates:
                         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
                         img_name = f"plate{plate_idx}_{ts_str}.tif"
                         img_path = str(self.run_dir / f"plate{plate_idx}" / img_name)
-
                         saved = camera.save_image(img_path)
                         if saved:
                             # Size & dimensions
@@ -178,19 +171,16 @@ class ExperimentRunner(QThread):
                             shape = camera.get_last_saved_shape()
                             if shape:
                                 height, width = shape  # we stored (h, w)
-
                             try:
                                 file_size = Path(img_path).stat().st_size
                             except Exception:
                                 file_size = None
-
                             # Capture metadata snapshot
                             md = camera.get_metadata()
-                            AeEnable     = md.get("AeEnable", None)
-                            ExposureTime = md.get("ExposureTime", None)   # microseconds
+                            AeEnable = md.get("AeEnable", None)
+                            ExposureTime = md.get("ExposureTime", None)  # microseconds
                             AnalogueGain = md.get("AnalogueGain", None)
-                            AwbEnable    = md.get("AwbEnable", None)
-
+                            AwbEnable = md.get("AwbEnable", None)
                             # Write CSV row
                             if self.csv_writer:
                                 self.csv_writer.writerow([
@@ -207,30 +197,24 @@ class ExperimentRunner(QThread):
                                     AnalogueGain,
                                     AwbEnable
                                 ])
-
                             self.image_saved_signal.emit(img_path)
                             self._log(f"Saved: {img_path}")
                         else:
                             self._log(f"Capture failed on plate {plate_idx}")
                     else:
                         self._log(f"Plate #{plate_idx}: skipped.")
-
                     # LED OFF
                     if self.led_control_fn:
                         self.led_control_fn(False, self.illumination_mode)
-
                     # Re-enable AE for next plate’s settle
                     camera.set_auto_exposure(True)
-
                     # Advance (drift correction on wrap handled in motor_control.advance)
                     motor_control.advance(status_callback=self.status_signal.emit)
                     self.plate_signal.emit(1 if plate_idx == 6 else plate_idx + 1)
-
-                    # Post-cycle wait after plate 6
-                    if plate_idx == 6 and not self._abort:
-                        self._log(f"Cycle complete. Waiting {self.frequency_minutes} min...")
-                        self._sleep_with_abort(self.frequency_minutes * 60)
-
+                # Post-cycle wait after plate 6
+                if plate_idx == 6 and not self._abort:
+                    self._log(f"Cycle complete. Waiting {self.frequency_minutes} min...")
+                    self._sleep_with_abort(self.frequency_minutes * 60)
         finally:
             # Wrap up
             self._log("Experiment finished." if not self._abort else "Experiment aborted.")

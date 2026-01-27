@@ -1,9 +1,6 @@
-
-# gui.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QDialog
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap
-
 from styles import dark_style
 from experiment_setup import ExperimentSetupDialog, ILLUM_GREEN, ILLUM_IR
 from experiment_runner import ExperimentRunner
@@ -16,8 +13,7 @@ import camera
 SEA_FOAM_GREEN = "#26A69A"  # Green mode button color
 DEEP_RED = "#B71C1C"        # Infrared mode button color
 
-
-# LED GPIO setup
+# LED GPIO setup (best-effort)
 try:
     import gpiod
     from gpiod.line import Value, Direction
@@ -46,9 +42,12 @@ class SeedlingImagerGUI(QWidget):
 
         self.threads = []
         self.experiment_thread = None
+        self.homing_worker = None  # <-- abortable homing worker
         self.active_illum_mode = ILLUM_GREEN
 
         main_layout = QHBoxLayout()
+
+        # Left: buttons
         button_layout = QVBoxLayout()
         button_layout.setSpacing(15)
         button_layout.setAlignment(Qt.AlignTop)
@@ -67,10 +66,14 @@ class SeedlingImagerGUI(QWidget):
         button_layout.addWidget(self.illum_toggle_btn)
 
         ha_layout = QHBoxLayout()
-        self.home_btn = QPushButton("Home"); self.home_btn.setFixedWidth(button_width // 2 - 5)
+        self.home_btn = QPushButton("Home");    self.home_btn.setFixedWidth(button_width // 2 - 5)
+        self.home_btn.setObjectName("homeBtn")  # precise styling when in STOP state
         self.advance_btn = QPushButton("Advance"); self.advance_btn.setFixedWidth(button_width // 2 - 5)
         ha_layout.addWidget(self.home_btn); ha_layout.addWidget(self.advance_btn)
-        self.home_btn.clicked.connect(lambda: self.run_motor_action("home"))
+
+        # NEW: stateful home/stop behavior
+        self.home_btn.clicked.connect(self.on_home_clicked)
+        # Keep MotorWorker for "advance" only
         self.advance_btn.clicked.connect(lambda: self.run_motor_action("advance"))
         button_layout.addLayout(ha_layout)
 
@@ -101,61 +104,120 @@ class SeedlingImagerGUI(QWidget):
         self.file_manager_btn.clicked.connect(self.open_file_manager)
         button_layout.addWidget(self.file_manager_btn)
 
-
         main_layout.addLayout(button_layout)
 
+        # Right: status + camera + log
         right_layout = QVBoxLayout()
         self.status_label = QLabel("Status: Ready"); self.status_label.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(self.status_label)
+
         self.camera_label = QLabel("Camera Preview"); self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setFixedSize(512, 288)
         right_layout.addWidget(self.camera_label, alignment=Qt.AlignRight)
+
         self.log_panel = QTextEdit(); self.log_panel.setReadOnly(True)
         right_layout.addWidget(self.log_panel)
+
         main_layout.addLayout(right_layout)
         self.setLayout(main_layout)
 
         self.timer = QTimer(); self.timer.timeout.connect(self.update_camera_frame)
         self.live_view_active = False
+
         self.update_controls_for_experiment(False)
 
         # Apply persisted camera settings at startup
         camera.apply_settings()
 
+    # ---------- Illumination ----------
     def apply_main_illum_style(self):
         color = "#26A69A" if self.active_illum_mode == ILLUM_GREEN else "#B71C1C"
-        self.illum_toggle_btn.setStyleSheet(dark_style + f" QPushButton {{ background-color: {color}; color: white; font-weight: bold; }}")
+        self.illum_toggle_btn.setStyleSheet(
+            dark_style + f" QPushButton {{ background-color: {color}; color: white; font-weight: bold; }}"
+        )
 
     def toggle_illumination_mode(self):
         """Switch between Green and Infrared illumination; update button style."""
-        from gpiod.line import Value
         self.active_illum_mode = ILLUM_IR if self.active_illum_mode == ILLUM_GREEN else ILLUM_GREEN
         self.illum_toggle_btn.setText(f"Illum: {self.active_illum_mode}")
         self.apply_main_illum_style()
-
         # If live view is active, apply the new illumination immediately
-        if self.live_view_active:
+        if self.live_view_active and led_request:
+            from gpiod.line import Value  # import only when needed
             if self.active_illum_mode == ILLUM_GREEN:
-                led_request.set_value(12, Value.ACTIVE)
-                led_request.set_value(13, Value.INACTIVE)
+                led_request.set_value(LED_GREEN_PIN, Value.ACTIVE)
+                led_request.set_value(LED_IR_PIN, Value.INACTIVE)
             else:
-                led_request.set_value(12, Value.INACTIVE)
-                led_request.set_value(13, Value.ACTIVE)
-
+                led_request.set_value(LED_GREEN_PIN, Value.INACTIVE)
+                led_request.set_value(LED_IR_PIN, Value.ACTIVE)
         self.update_status(f"Illumination set to {self.active_illum_mode}")
 
+    # ---------- Home/Stop logic ----------
+    def on_home_clicked(self):
+        """Toggle behavior: start homing or request stop."""
+        if self.homing_worker is None or not self.homing_worker.isRunning():
+            self.start_homing()
+        else:
+            self.stop_homing()
 
+    def start_homing(self):
+        # Ensure driver is enabled before motion (EN low = enabled)
+        motor_control.driver_enable()  # per wiring in your project  # based on current codebase
+
+        # Update UI to STOP state (direct, per-widget style to override app-wide blue)
+        self.home_btn.setText("STOP")
+        self.home_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold;")
+        # Disable potentially conflicting controls during homing
+        self.advance_btn.setEnabled(False)
+        self.experiment_btn.setEnabled(False)
+        self.illum_toggle_btn.setEnabled(False)
+        self.camera_config_btn.setEnabled(False)
+
+        # Launch worker
+        self.homing_worker = HomingWorker()
+        self.homing_worker.status_signal.connect(self.update_status)
+        self.homing_worker.finished_with_result.connect(self.on_homing_finished)
+        self.homing_worker.start()
+        self.update_status("Homing started...")
+
+    def stop_homing(self):
+        # Immediate hardware e-stop: cut coil current now (EN high = disabled)
+        motor_control.driver_disable()
+        if self.homing_worker and self.homing_worker.isRunning():
+            self.homing_worker.request_stop()
+            self.update_status("Emergency stop requested... (driver disabled)")
+
+    def on_homing_finished(self, plate_or_none):
+        # Restore UI to normal state
+        self.home_btn.setText("Home")
+        self.home_btn.setStyleSheet("")  # clear per-widget override; fallback to app-wide blue
+        self.advance_btn.setEnabled(True)
+        self.experiment_btn.setEnabled(True)
+        self.illum_toggle_btn.setEnabled(True)
+        self.camera_config_btn.setEnabled(True)
+
+        self.homing_worker = None
+
+        if plate_or_none is None:
+            # Leave driver disabled after emergency stop for safety.
+            self.update_status("Homing aborted or failed. Driver remains DISABLED.")
+        else:
+            # Keep driver enabled after normal completion (holding torque).
+            self.update_status("Homing finished. Driver remains ENABLED.")
+
+    # ---------- Motion helper (kept for 'advance') ----------
     def run_motor_action(self, action):
+        # Keep for "advance" only
         worker = MotorWorker(action)
         self.threads.append(worker)
         worker.finished.connect(lambda: self.threads.remove(worker))
         worker.status_signal.connect(self.update_status)
         worker.start()
 
+    # ---------- UI / Camera / LED ----------
     def update_status(self, text):
         self.status_label.setText(text)
         self.log_panel.append(text)
-
 
     def toggle_live_view(self):
         if not self.live_view_active:
@@ -167,6 +229,7 @@ class SeedlingImagerGUI(QWidget):
             self.update_status(f"Live View started. {self.active_illum_mode} LED ON.")
             # Turn ON selected illumination
             if led_request:
+                from gpiod.line import Value
                 if self.active_illum_mode == ILLUM_GREEN:
                     led_request.set_value(LED_GREEN_PIN, Value.ACTIVE)
                     led_request.set_value(LED_IR_PIN, Value.INACTIVE)
@@ -181,9 +244,9 @@ class SeedlingImagerGUI(QWidget):
             self.update_status("Live View stopped.")
             # Turn OFF both LEDs
             if led_request:
+                from gpiod.line import Value
                 led_request.set_value(LED_GREEN_PIN, Value.INACTIVE)
                 led_request.set_value(LED_IR_PIN, Value.INACTIVE)
-
 
     def update_camera_frame(self):
         frame = camera.get_frame()
@@ -221,19 +284,21 @@ class SeedlingImagerGUI(QWidget):
         self.update_controls_for_experiment(False)
         self.update_status("Experiment finished.")
 
-    def update_controls_for_experiment(self, running):
+    def update_controls_for_experiment(self, running: bool):
+        """Enable/disable controls while an experiment is running."""
+        # Live View and motion/Config controls should be disabled during a run
         self.live_view_btn.setEnabled(not running)
         self.home_btn.setEnabled(not running)
         self.advance_btn.setEnabled(not running)
         self.experiment_btn.setEnabled(not running)
         self.illum_toggle_btn.setEnabled(not running)
-        self.end_experiment_btn.setEnabled(running)
         self.camera_config_btn.setEnabled(not running)
+        # Only the "End Experiment" button is enabled during a run
+        self.end_experiment_btn.setEnabled(running)
 
     def open_camera_config(self):
         if self.live_view_active:
             self.toggle_live_view()  # Stop live preview while changing settings
-
         dialog = CameraConfigDialog(current_settings=camera.get_current_settings(), parent=self)
         if dialog.exec() == QDialog.Accepted:
             # Dialog saves settings to JSON internally
@@ -244,13 +309,15 @@ class SeedlingImagerGUI(QWidget):
 
     def set_led(self, on: bool, mode: str):
         """LED control helper passed to ExperimentRunner."""
+        if not led_request:
+            return
         from gpiod.line import Value
         if mode == ILLUM_GREEN:
-            led_request.set_value(12, Value.ACTIVE if on else Value.INACTIVE)
-            led_request.set_value(13, Value.INACTIVE)
+            led_request.set_value(LED_GREEN_PIN, Value.ACTIVE if on else Value.INACTIVE)
+            led_request.set_value(LED_IR_PIN, Value.INACTIVE)
         else:
-            led_request.set_value(12, Value.INACTIVE)
-            led_request.set_value(13, Value.ACTIVE if on else Value.INACTIVE)
+            led_request.set_value(LED_GREEN_PIN, Value.INACTIVE)
+            led_request.set_value(LED_IR_PIN, Value.ACTIVE if on else Value.INACTIVE)
 
     def open_file_manager(self):
         # Stop Live View to avoid racing the camera while user manages files (optional)
@@ -264,29 +331,66 @@ class SeedlingImagerGUI(QWidget):
         if self.experiment_thread and self.experiment_thread.isRunning():
             self.experiment_thread.abort()
             self.experiment_thread.wait()
+        if self.homing_worker and self.homing_worker.isRunning():
+            self.stop_homing()
+            self.homing_worker.wait()
         if self.live_view_active:
             self.toggle_live_view()
         event.accept()
 
 
-# MotorWorker class (unchanged from previous versions)
-from PySide6.QtCore import QThread, Signal
+# Abortable homing worker
+class HomingWorker(QThread):
+    status_signal = Signal(str)
+    finished_with_result = Signal(object)  # plate index (int) on success, or None
+
+    def __init__(self):
+        super().__init__()
+        self._abort = False
+
+    def request_stop(self):
+        self._abort = True
+
+    def _should_abort(self):
+        return self._abort
+
+    def run(self):
+        try:
+            plate = motor_control.home(
+                status_callback=self.status_signal.emit,
+                should_abort=self._should_abort
+            )
+            if plate is not None:
+                self.status_signal.emit(f"Homing finished. Plate #{plate}")
+            else:
+                self.status_signal.emit("Homing stopped.")
+            self.finished_with_result.emit(plate)
+        except Exception as e:
+            self.status_signal.emit(f"Error: {e}")
+            self.finished_with_result.emit(None)
+
+
+# MotorWorker class (kept for 'advance' only, with driver enable)
 class MotorWorker(QThread):
     status_signal = Signal(str)
+
     def __init__(self, action):
         super().__init__()
         self.action = action
+
     def run(self):
         try:
-            if self.action == "home":
+            if self.action == "advance":
+                self.status_signal.emit("Advancing to next plate...")
+                motor_control.driver_enable()  # ensure enabled before motion
+                motor_control.advance(status_callback=self.status_signal.emit)
+            elif self.action == "home":
+                # Not used anymore (replaced by HomingWorker), kept for compatibility
+                motor_control.driver_enable()
                 plate = motor_control.home(status_callback=self.status_signal.emit)
                 if plate is not None:
                     self.status_signal.emit(f"Homing finished. Plate #{plate}")
                 else:
                     self.status_signal.emit("Homing failed")
-            elif self.action == "advance":
-                self.status_signal.emit("Advancing to next plate...")
-                motor_control.advance(status_callback=self.status_signal.emit)
         except Exception as e:
             self.status_signal.emit(f"Error: {e}")
-
