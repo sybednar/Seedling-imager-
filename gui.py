@@ -1,3 +1,4 @@
+#gui.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QDialog
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap
@@ -71,7 +72,7 @@ class SeedlingImagerGUI(QWidget):
         self.advance_btn = QPushButton("Advance"); self.advance_btn.setFixedWidth(button_width // 2 - 5)
         ha_layout.addWidget(self.home_btn); ha_layout.addWidget(self.advance_btn)
 
-        # NEW: stateful home/stop behavior
+        # Stateful home/stop behavior
         self.home_btn.clicked.connect(self.on_home_clicked)
         # Keep MotorWorker for "advance" only
         self.advance_btn.clicked.connect(lambda: self.run_motor_action("advance"))
@@ -152,7 +153,7 @@ class SeedlingImagerGUI(QWidget):
                 led_request.set_value(LED_IR_PIN, Value.ACTIVE)
         self.update_status(f"Illumination set to {self.active_illum_mode}")
 
-    # ---------- Home/Stop logic ----------
+    # ---------- Home/Stop logic (manual use via Home button) ----------
     def on_home_clicked(self):
         """Toggle behavior: start homing or request stop."""
         if self.homing_worker is None or not self.homing_worker.isRunning():
@@ -161,13 +162,13 @@ class SeedlingImagerGUI(QWidget):
             self.stop_homing()
 
     def start_homing(self):
-        # Ensure driver is enabled before motion (EN low = enabled)
-        motor_control.driver_enable()  # per wiring in your project  # based on current codebase
+        # Ensure driver is enabled before motion (EN low = enabled per wiring)
+        motor_control.driver_enable()  # enable driver  [1](https://uwprod-my.sharepoint.com/personal/sybednar_wisc_edu/Documents/Microsoft%20Copilot%20Chat%20Files/git_update.sh.txt)
 
         # Update UI to STOP state (direct, per-widget style to override app-wide blue)
         self.home_btn.setText("STOP")
         self.home_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold;")
-        # Disable potentially conflicting controls during homing
+        # Disable potentially conflicting controls during homing (keep Home enabled for STOP)
         self.advance_btn.setEnabled(False)
         self.experiment_btn.setEnabled(False)
         self.illum_toggle_btn.setEnabled(False)
@@ -182,7 +183,7 @@ class SeedlingImagerGUI(QWidget):
 
     def stop_homing(self):
         # Immediate hardware e-stop: cut coil current now (EN high = disabled)
-        motor_control.driver_disable()
+        motor_control.driver_disable()  # disable driver  [1](https://uwprod-my.sharepoint.com/personal/sybednar_wisc_edu/Documents/Microsoft%20Copilot%20Chat%20Files/git_update.sh.txt)
         if self.homing_worker and self.homing_worker.isRunning():
             self.homing_worker.request_stop()
             self.update_status("Emergency stop requested... (driver disabled)")
@@ -205,16 +206,124 @@ class SeedlingImagerGUI(QWidget):
             # Keep driver enabled after normal completion (holding torque).
             self.update_status("Homing finished. Driver remains ENABLED.")
 
-    # ---------- Motion helper (kept for 'advance') ----------
-    def run_motor_action(self, action):
-        # Keep for "advance" only
-        worker = MotorWorker(action)
-        self.threads.append(worker)
-        worker.finished.connect(lambda: self.threads.remove(worker))
-        worker.status_signal.connect(self.update_status)
-        worker.start()
+    # ---------- Homing-with-preview right before starting an experiment ----------
+    def open_experiment_setup(self):
+        if self.live_view_active:
+            self.toggle_live_view()
+        dialog = ExperimentSetupDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            # Run homing with preview first, then launch the runner
+            self.start_experiment_with_homing_preview(
+                plates=dialog.selected_plates,
+                days=dialog.duration_days,
+                freq=dialog.frequency_minutes,
+                illum=dialog.selected_illum
+            )
 
-    # ---------- UI / Camera / LED ----------
+    def start_experiment_with_homing_preview(self, plates, days, freq, illum):
+        """
+        1) Turn on Live View so the user SEES homing.
+        2) Perform homing via HomingWorker (STOP/E-stop available through Home button).
+        3) On success: stop Live View and start ExperimentRunner(skip homing).
+        """
+        # Remember chosen illumination and show it in preview
+        self.active_illum_mode = illum
+        self.apply_main_illum_style()
+
+        # Turn on Live View (sets LEDs for the chosen mode)
+        if not self.live_view_active:
+            self.toggle_live_view()
+        self.update_status("Starting homing (with preview)... Press STOP to abort if needed.")
+
+        # Ensure driver enabled, set Home button to STOP style, and disable other controls
+        motor_control.driver_enable()  # enable driver  [1](https://uwprod-my.sharepoint.com/personal/sybednar_wisc_edu/Documents/Microsoft%20Copilot%20Chat%20Files/git_update.sh.txt)
+        self.home_btn.setText("STOP")
+        self.home_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold;")
+        self.advance_btn.setEnabled(False)
+        self.experiment_btn.setEnabled(False)
+        self.illum_toggle_btn.setEnabled(False)
+        self.camera_config_btn.setEnabled(False)
+
+        # Launch a dedicated homing worker
+        self.homing_worker = HomingWorker()
+        self.homing_worker.status_signal.connect(self.update_status)
+        # When homing completes, continue to experiment or abort
+        self.homing_worker.finished_with_result.connect(
+            lambda plate_or_none: self._on_preview_homing_done(
+                plate_or_none, plates, days, freq, illum
+            )
+        )
+        self.homing_worker.start()
+
+    def _on_preview_homing_done(self, plate_or_none, plates, days, freq, illum):
+        # Restore Home button and re-enable the controls disabled for the preview-homing step
+        self.home_btn.setText("Home")
+        self.home_btn.setStyleSheet("")
+        self.advance_btn.setEnabled(True)
+        self.experiment_btn.setEnabled(True)
+        self.illum_toggle_btn.setEnabled(True)
+        self.camera_config_btn.setEnabled(True)
+
+        self.homing_worker = None
+
+        if plate_or_none is None:
+            # Homing aborted/failed — stop preview and keep driver disabled (safety).
+            if self.live_view_active:
+                self.toggle_live_view()
+            self.update_status("Experiment start aborted: homing failed or was stopped. Driver remains DISABLED.")
+            return
+
+        # Homing succeeded: stop preview before starting the experiment run
+        if self.live_view_active:
+            self.toggle_live_view()
+
+        # Start the standard experiment loop, but SKIP homing (we just did it with preview)
+        self.start_experiment(plates, days, freq, illum, skip_initial_homing=True)
+
+    # ---------- Experiment orchestration ----------
+    def start_experiment(self, plates, days, freq, illum, skip_initial_homing=False):
+        if self.experiment_thread and self.experiment_thread.isRunning():
+            self.update_status("Experiment already running."); return
+        # Ensure Live View is off during the experiment
+        if self.live_view_active:
+            self.toggle_live_view()
+
+        # Create the runner, passing perform_homing flag inverse of skip_initial_homing
+        self.experiment_thread = ExperimentRunner(
+            plates, days, freq, illum, self.set_led, perform_homing=(not skip_initial_homing)
+        )
+        self.experiment_thread.status_signal.connect(self.update_status)
+        self.experiment_thread.image_saved_signal.connect(lambda p: self.log_panel.append(f"Image saved: {p}"))
+        self.experiment_thread.plate_signal.connect(lambda idx: self.status_label.setText(f"Plate #{idx}"))
+        self.experiment_thread.finished_signal.connect(self.on_experiment_finished)
+        self.update_controls_for_experiment(True)
+        self.experiment_thread.start()
+
+    def end_experiment(self):
+        if self.experiment_thread and self.experiment_thread.isRunning():
+            self.experiment_thread.abort(); self.experiment_thread.wait()
+            self.update_status("Experiment ended by user.")
+        else:
+            self.update_status("No experiment running.")
+        self.update_controls_for_experiment(False)
+
+    def on_experiment_finished(self):
+        self.update_controls_for_experiment(False)
+        self.update_status("Experiment finished.")
+
+    def update_controls_for_experiment(self, running: bool):
+        """Enable/disable controls while an experiment is running."""
+        # Live View and motion/Config controls should be disabled during a run
+        self.live_view_btn.setEnabled(not running)
+        self.home_btn.setEnabled(not running)
+        self.advance_btn.setEnabled(not running)
+        self.experiment_btn.setEnabled(not running)
+        self.illum_toggle_btn.setEnabled(not running)
+        self.camera_config_btn.setEnabled(not running)
+        # Only the "End Experiment" button is enabled during a run
+        self.end_experiment_btn.setEnabled(running)
+
+    # ---------- Camera / LEDs / File manager ----------
     def update_status(self, text):
         self.status_label.setText(text)
         self.log_panel.append(text)
@@ -252,49 +361,6 @@ class SeedlingImagerGUI(QWidget):
         frame = camera.get_frame()
         pixmap = QPixmap.fromImage(frame)
         self.camera_label.setPixmap(pixmap.scaled(self.camera_label.size(), Qt.KeepAspectRatio))
-
-    def open_experiment_setup(self):
-        if self.live_view_active:
-            self.toggle_live_view()
-        dialog = ExperimentSetupDialog(self)
-        if dialog.exec() == QDialog.Accepted:
-            self.start_experiment(dialog.selected_plates, dialog.duration_days, dialog.frequency_minutes, dialog.selected_illum)
-
-    def start_experiment(self, plates, days, freq, illum):
-        if self.experiment_thread and self.experiment_thread.isRunning():
-            self.update_status("Experiment already running."); return
-        if self.live_view_active: self.toggle_live_view()
-        self.experiment_thread = ExperimentRunner(plates, days, freq, illum, self.set_led)
-        self.experiment_thread.status_signal.connect(self.update_status)
-        self.experiment_thread.image_saved_signal.connect(lambda p: self.log_panel.append(f"Image saved: {p}"))
-        self.experiment_thread.plate_signal.connect(lambda idx: self.status_label.setText(f"Plate #{idx}"))
-        self.experiment_thread.finished_signal.connect(self.on_experiment_finished)
-        self.update_controls_for_experiment(True)
-        self.experiment_thread.start()
-
-    def end_experiment(self):
-        if self.experiment_thread and self.experiment_thread.isRunning():
-            self.experiment_thread.abort(); self.experiment_thread.wait()
-            self.update_status("Experiment ended by user.")
-        else:
-            self.update_status("No experiment running.")
-        self.update_controls_for_experiment(False)
-
-    def on_experiment_finished(self):
-        self.update_controls_for_experiment(False)
-        self.update_status("Experiment finished.")
-
-    def update_controls_for_experiment(self, running: bool):
-        """Enable/disable controls while an experiment is running."""
-        # Live View and motion/Config controls should be disabled during a run
-        self.live_view_btn.setEnabled(not running)
-        self.home_btn.setEnabled(not running)
-        self.advance_btn.setEnabled(not running)
-        self.experiment_btn.setEnabled(not running)
-        self.illum_toggle_btn.setEnabled(not running)
-        self.camera_config_btn.setEnabled(not running)
-        # Only the "End Experiment" button is enabled during a run
-        self.end_experiment_btn.setEnabled(running)
 
     def open_camera_config(self):
         if self.live_view_active:

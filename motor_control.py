@@ -181,3 +181,7 @@ def goto_plate(target_plate, status_callback=None):
         advance(status_callback=status_callback)
         max_steps -= 1
     return current_plate
+
+    def get_current_plate():
+        """Return the current plate index (0 means 'unknown/not homed')."""
+        return current_plate
